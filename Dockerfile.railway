@@ -1,0 +1,113 @@
+# Railway-specific Dockerfile
+# Extends the base Clawdbot build with CLI availability + Tailscale
+# Keep this file separate to avoid upstream merge conflicts
+
+FROM node:22-bookworm
+
+# Install Bun (required for build scripts)
+RUN curl -fsSL https://bun.sh/install | bash
+ENV PATH="/root/.bun/bin:${PATH}"
+
+RUN corepack enable
+
+# Install Tailscale
+RUN curl -fsSL https://tailscale.com/install.sh | sh
+
+# Install Homebrew dependencies (brew itself will be installed to /data on first run)
+RUN apt-get update && apt-get install -y build-essential procps curl file git && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Homebrew will live at /data/homebrew (persistent volume)
+ENV HOMEBREW_PREFIX="/data/homebrew"
+ENV HOMEBREW_CELLAR="/data/homebrew/Cellar"
+ENV HOMEBREW_REPOSITORY="/data/homebrew"
+ENV PATH="/data/homebrew/bin:/data/homebrew/sbin:${PATH}"
+
+WORKDIR /app
+
+ARG CLAWDBOT_DOCKER_APT_PACKAGES=""
+RUN if [ -n "$CLAWDBOT_DOCKER_APT_PACKAGES" ]; then \
+    apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends $CLAWDBOT_DOCKER_APT_PACKAGES && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*; \
+    fi
+
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc ./
+COPY ui/package.json ./ui/package.json
+COPY patches ./patches
+COPY scripts ./scripts
+
+RUN pnpm install --frozen-lockfile
+
+COPY . .
+RUN pnpm build
+ENV CLAWDBOT_PREFER_PNPM=1
+RUN pnpm ui:install
+RUN pnpm ui:build
+
+# =============================================================================
+# Railway customizations below
+# =============================================================================
+
+# Install clawdbot CLI globally so `clawdbot` command is available
+RUN npm link
+
+# Create a convenience wrapper script
+RUN echo '#!/bin/bash\nnode /app/dist/entry.js "$@"' > /usr/local/bin/clawdbot && \
+    chmod +x /usr/local/bin/clawdbot
+
+# Create startup script that runs Tailscale + Clawdbot
+COPY <<'EOF' /usr/local/bin/start-railway.sh
+#!/bin/bash
+set -e
+
+# Start tailscaled in userspace networking mode (works in containers)
+echo "Starting tailscaled..."
+mkdir -p /data/tailscale /var/run/tailscale
+tailscaled --state=/data/tailscale/tailscaled.state --socket=/var/run/tailscale/tailscaled.sock --tun=userspace-networking &
+
+# Wait for tailscaled to be ready
+sleep 2
+
+# Authenticate with Tailscale if auth key provided
+if [ -n "$TAILSCALE_AUTHKEY" ]; then
+  echo "Authenticating with Tailscale..."
+  tailscale up --authkey="$TAILSCALE_AUTHKEY" --hostname="${TAILSCALE_HOSTNAME:-clawdbot-railway}" --accept-routes
+else
+  echo "Warning: TAILSCALE_AUTHKEY not set, Tailscale not authenticated"
+fi
+
+# Show Tailscale status
+tailscale status || true
+
+# Install Homebrew to persistent volume if not already present
+if [ ! -x "/data/homebrew/bin/brew" ]; then
+  echo "Installing Homebrew to /data/homebrew (first run)..."
+  mkdir -p /data/homebrew
+  curl -fsSL https://github.com/Homebrew/brew/tarball/master | tar xz --strip-components=1 -C /data/homebrew
+  echo "Homebrew installed. Run 'brew --version' to verify."
+else
+  echo "Homebrew found at /data/homebrew"
+fi
+
+# Update brew PATH for this session
+export PATH="/data/homebrew/bin:/data/homebrew/sbin:$PATH"
+brew --version || true
+
+# Start Clawdbot gateway
+echo "Starting Clawdbot gateway..."
+exec node /app/dist/entry.js gateway --allow-unconfigured --port 18789 --bind lan
+EOF
+RUN chmod +x /usr/local/bin/start-railway.sh
+
+# Create runtime directory for Tailscale socket (not /data, that's a volume mount)
+RUN mkdir -p /var/run/tailscale
+
+ENV NODE_ENV=production
+
+# Note: Running as root is required for tailscaled
+# Persistent state lives on /data volume: tailscale, homebrew, clawdbot config
+
+# Default command - runs Tailscale, Homebrew setup, and Clawdbot
+CMD ["/usr/local/bin/start-railway.sh"]
