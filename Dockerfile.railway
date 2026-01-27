@@ -98,7 +98,7 @@ brew --version || true
 
 # Start Clawdbot gateway
 echo "Starting Clawdbot gateway..."
-exec node /app/dist/entry.js gateway --allow-unconfigured --port 18789 --bind lan
+exec node /app/dist/entry.js gateway --allow-unconfigured --port 8080 --bind lan
 EOF
 RUN chmod +x /usr/local/bin/start-railway.sh
 
