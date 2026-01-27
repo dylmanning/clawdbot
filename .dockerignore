@@ -40,12 +40,14 @@ apps/ios/build
 
 # large app trees not needed for CLI build
 apps/
+!apps/shared
 assets/
 Peekaboo/
 Swabble/
 Core/
 Users/
 vendor/
+!vendor/a2ui
 
 # Needed for building the Canvas A2UI bundle during Docker image builds.
 # Keep the rest of apps/ and vendor/ excluded to avoid a large build context.
