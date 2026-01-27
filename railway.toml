@@ -1,0 +1,18 @@
+# Railway configuration
+# See: https://docs.railway.app/reference/config-as-code
+
+[build]
+dockerfilePath = "Dockerfile.railway"
+
+[deploy]
+healthcheckPath = "/health"
+healthcheckTimeout = 30
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 3
+
+# Required environment variables (set in Railway dashboard):
+# - TAILSCALE_AUTHKEY: Your Tailscale auth key (reusable recommended)
+# - TAILSCALE_HOSTNAME: Optional, defaults to "clawdbot-railway"
+# - SETUP_PASSWORD: Password for /setup wizard
+# - CLAWDBOT_STATE_DIR: /data/.clawdbot
+# - CLAWDBOT_WORKSPACE_DIR: /data/workspace
