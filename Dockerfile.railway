@@ -55,11 +55,8 @@ RUN pnpm ui:build
 # =============================================================================
 
 # Install clawdbot CLI globally so `clawdbot` command is available
+# npm link creates a symlink from global node_modules to /app
 RUN npm link
-
-# Create a convenience wrapper script
-RUN echo '#!/bin/bash\nnode /app/dist/entry.js "$@"' > /usr/local/bin/clawdbot && \
-  chmod +x /usr/local/bin/clawdbot
 
 # Create startup script that runs Tailscale + Clawdbot
 COPY <<'EOF' /usr/local/bin/start-railway.sh
