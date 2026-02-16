@@ -95,6 +95,27 @@ fi
 export PATH="/data/homebrew/bin:/data/homebrew/sbin:$PATH"
 brew --version || true
 
+# Preflight: auto-heal legacy/invalid hooks.transformsDir values that now fail
+# strict hook transform path containment checks.
+STATE_DIR="${OPENCLAW_STATE_DIR:-${CLAWDBOT_STATE_DIR:-/data/.clawdbot}}"
+TRANSFORMS_ROOT="${STATE_DIR%/}/hooks/transforms"
+CURRENT_TRANSFORMS_DIR="$(openclaw config get hooks.transformsDir 2>/dev/null | tail -n 1 | tr -d '\r' || true)"
+
+if [ -n "$CURRENT_TRANSFORMS_DIR" ]; then
+  if [ "${CURRENT_TRANSFORMS_DIR#\"}" != "$CURRENT_TRANSFORMS_DIR" ] && [ "${CURRENT_TRANSFORMS_DIR%\"}" != "$CURRENT_TRANSFORMS_DIR" ]; then
+    CURRENT_TRANSFORMS_DIR="${CURRENT_TRANSFORMS_DIR#\"}"
+    CURRENT_TRANSFORMS_DIR="${CURRENT_TRANSFORMS_DIR%\"}"
+  fi
+
+  IS_INVALID="$(node -e 'const path = require("node:path"); const target = process.argv[1] || ""; const root = process.argv[2] || ""; const base = path.resolve(root); const resolved = path.isAbsolute(target) ? path.resolve(target) : path.resolve(base, target); const rel = path.relative(base, resolved); const outside = rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel); process.stdout.write(outside ? "1" : "0");' "$CURRENT_TRANSFORMS_DIR" "$TRANSFORMS_ROOT" 2>/dev/null || echo "")"
+
+  if [ "$IS_INVALID" = "1" ]; then
+    echo "Detected invalid hooks.transformsDir='$CURRENT_TRANSFORMS_DIR' (must be within $TRANSFORMS_ROOT)."
+    echo "Auto-healing: setting hooks.transformsDir=hooks/transforms"
+    openclaw config set hooks.transformsDir hooks/transforms
+  fi
+fi
+
 # Start OpenClaw gateway
 echo "Starting OpenClaw gateway..."
 exec node /app/openclaw.mjs gateway --allow-unconfigured --port 8080 --bind lan
