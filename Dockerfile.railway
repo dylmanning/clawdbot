@@ -95,24 +95,33 @@ fi
 export PATH="/data/homebrew/bin:/data/homebrew/sbin:$PATH"
 brew --version || true
 
-# Preflight: auto-heal legacy/invalid hooks.transformsDir values that now fail
-# strict hook transform path containment checks.
+# Preflight: recover from malformed config JSON5 created by bad config.patch
+# by restoring the corresponding .bak file when available.
 STATE_DIR="${OPENCLAW_STATE_DIR:-${CLAWDBOT_STATE_DIR:-/data/.clawdbot}}"
-TRANSFORMS_ROOT="${STATE_DIR%/}/hooks/transforms"
-CURRENT_TRANSFORMS_DIR="$(openclaw config get hooks.transformsDir 2>/dev/null | tail -n 1 | tr -d '\r' || true)"
+CONFIG_PATH="${OPENCLAW_CONFIG_PATH:-${CLAWDBOT_CONFIG_PATH:-}}"
 
-if [ -n "$CURRENT_TRANSFORMS_DIR" ]; then
-  if [ "${CURRENT_TRANSFORMS_DIR#\"}" != "$CURRENT_TRANSFORMS_DIR" ] && [ "${CURRENT_TRANSFORMS_DIR%\"}" != "$CURRENT_TRANSFORMS_DIR" ]; then
-    CURRENT_TRANSFORMS_DIR="${CURRENT_TRANSFORMS_DIR#\"}"
-    CURRENT_TRANSFORMS_DIR="${CURRENT_TRANSFORMS_DIR%\"}"
-  fi
+if [ -z "$CONFIG_PATH" ]; then
+  for candidate in "$STATE_DIR/openclaw.json" "$STATE_DIR/clawdbot.json" "$STATE_DIR/moldbot.json" "$STATE_DIR/moltbot.json"; do
+    if [ -f "$candidate" ]; then
+      CONFIG_PATH="$candidate"
+      break
+    fi
+  done
+fi
 
-  IS_INVALID="$(node -e 'const path = require("node:path"); const target = process.argv[1] || ""; const root = process.argv[2] || ""; const base = path.resolve(root); const resolved = path.isAbsolute(target) ? path.resolve(target) : path.resolve(base, target); const rel = path.relative(base, resolved); const outside = rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel); process.stdout.write(outside ? "1" : "0");' "$CURRENT_TRANSFORMS_DIR" "$TRANSFORMS_ROOT" 2>/dev/null || echo "")"
+if [ -z "$CONFIG_PATH" ]; then
+  CONFIG_PATH="$STATE_DIR/openclaw.json"
+fi
 
-  if [ "$IS_INVALID" = "1" ]; then
-    echo "Detected invalid hooks.transformsDir='$CURRENT_TRANSFORMS_DIR' (must be within $TRANSFORMS_ROOT)."
-    echo "Auto-healing: setting hooks.transformsDir=hooks/transforms"
-    openclaw config set hooks.transformsDir hooks/transforms
+if [ -f "$CONFIG_PATH" ]; then
+  if ! node -e 'const fs = require("node:fs"); const JSON5 = require("json5"); const p = process.argv[1]; JSON5.parse(fs.readFileSync(p, "utf8"));' "$CONFIG_PATH" >/dev/null 2>&1; then
+    BACKUP_PATH="$CONFIG_PATH.bak"
+    if [ -f "$BACKUP_PATH" ]; then
+      echo "Config parse failed for $CONFIG_PATH; restoring backup $BACKUP_PATH"
+      cp "$BACKUP_PATH" "$CONFIG_PATH"
+    else
+      echo "Config parse failed for $CONFIG_PATH and no backup found at $BACKUP_PATH"
+    fi
   fi
 fi
 
