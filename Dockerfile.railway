@@ -1,0 +1,156 @@
+# Railway-specific Dockerfile
+# Extends the base OpenClaw build with CLI availability + Tailscale
+# Keep this file separate to avoid upstream merge conflicts
+
+FROM node:22-bookworm
+
+# Install Bun (required for build scripts)
+RUN curl -fsSL https://bun.sh/install | bash
+ENV PATH="/root/.bun/bin:${PATH}"
+
+RUN corepack enable
+
+# Install Tailscale
+RUN curl -fsSL https://tailscale.com/install.sh | sh
+
+# Install Homebrew dependencies (brew itself will be installed to /data on first run)
+RUN apt-get update && apt-get install -y build-essential procps curl file git && \
+  apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Homebrew will live at /data/homebrew (persistent volume)
+ENV HOMEBREW_PREFIX="/data/homebrew"
+ENV HOMEBREW_CELLAR="/data/homebrew/Cellar"
+ENV HOMEBREW_REPOSITORY="/data/homebrew"
+ENV PATH="/data/homebrew/bin:/data/homebrew/sbin:${PATH}"
+
+WORKDIR /app
+
+ARG OPENCLAW_DOCKER_APT_PACKAGES=""
+RUN if [ -n "$OPENCLAW_DOCKER_APT_PACKAGES" ]; then \
+  apt-get update && \
+  DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends $OPENCLAW_DOCKER_APT_PACKAGES && \
+  apt-get clean && \
+  rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*; \
+  fi
+
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc ./
+COPY ui/package.json ./ui/package.json
+COPY patches ./patches
+COPY scripts ./scripts
+
+RUN pnpm install --frozen-lockfile
+
+# Optionally install Chromium and Xvfb for browser automation.
+# Build with: docker build --build-arg OPENCLAW_INSTALL_BROWSER=1 ...
+# Adds ~300MB but eliminates the 60-90s Playwright install on every container start.
+# Must run after pnpm install so playwright-core is available in node_modules.
+ARG OPENCLAW_INSTALL_BROWSER=""
+RUN if [ -n "$OPENCLAW_INSTALL_BROWSER" ]; then \
+  apt-get update && \
+  DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends xvfb && \
+  node /app/node_modules/playwright-core/cli.js install --with-deps chromium && \
+  apt-get clean && \
+  rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*; \
+  fi
+
+# Copy A2UI dependencies first (excluded by .dockerignore but needed for build)
+COPY vendor/a2ui ./vendor/a2ui
+COPY apps/shared ./apps/shared
+
+COPY . .
+RUN pnpm build
+ENV OPENCLAW_PREFER_PNPM=1
+RUN pnpm ui:build
+
+# =============================================================================
+# Railway customizations below
+# =============================================================================
+
+# Install openclaw CLI globally so `openclaw` command is available
+# npm link creates a symlink from global node_modules to /app
+RUN npm link
+
+# Create startup script that runs Tailscale + OpenClaw
+COPY <<'EOF' /usr/local/bin/start-railway.sh
+#!/bin/bash
+set -e
+
+# Start tailscaled in userspace networking mode (works in containers)
+echo "Starting tailscaled..."
+mkdir -p /data/tailscale /var/run/tailscale
+tailscaled --state=/data/tailscale/tailscaled.state --socket=/var/run/tailscale/tailscaled.sock --tun=userspace-networking &
+
+# Wait for tailscaled to be ready
+sleep 2
+
+# Authenticate with Tailscale if auth key provided
+if [ -n "$TAILSCALE_AUTHKEY" ]; then
+  echo "Authenticating with Tailscale..."
+  tailscale up --authkey="$TAILSCALE_AUTHKEY" --hostname="${TAILSCALE_HOSTNAME:-openclaw-railway}" --accept-routes
+else
+  echo "Warning: TAILSCALE_AUTHKEY not set, Tailscale not authenticated"
+fi
+
+# Show Tailscale status
+tailscale status || true
+
+# Install Homebrew to persistent volume if not already present
+if [ ! -x "/data/homebrew/bin/brew" ]; then
+  echo "Installing Homebrew to /data/homebrew (first run)..."
+  mkdir -p /data/homebrew
+  curl -fsSL https://github.com/Homebrew/brew/tarball/master | tar xz --strip-components=1 -C /data/homebrew
+  echo "Homebrew installed. Run 'brew --version' to verify."
+else
+  echo "Homebrew found at /data/homebrew"
+fi
+
+# Update brew PATH for this session
+export PATH="/data/homebrew/bin:/data/homebrew/sbin:$PATH"
+brew --version || true
+
+# Preflight: recover from malformed config JSON5 created by bad config.patch
+# by restoring the corresponding .bak file when available.
+STATE_DIR="${OPENCLAW_STATE_DIR:-${CLAWDBOT_STATE_DIR:-/data/.clawdbot}}"
+CONFIG_PATH="${OPENCLAW_CONFIG_PATH:-${CLAWDBOT_CONFIG_PATH:-}}"
+
+if [ -z "$CONFIG_PATH" ]; then
+  for candidate in "$STATE_DIR/openclaw.json" "$STATE_DIR/clawdbot.json" "$STATE_DIR/moldbot.json" "$STATE_DIR/moltbot.json"; do
+    if [ -f "$candidate" ]; then
+      CONFIG_PATH="$candidate"
+      break
+    fi
+  done
+fi
+
+if [ -z "$CONFIG_PATH" ]; then
+  CONFIG_PATH="$STATE_DIR/openclaw.json"
+fi
+
+if [ -f "$CONFIG_PATH" ]; then
+  if ! node -e 'const fs = require("node:fs"); const JSON5 = require("json5"); const p = process.argv[1]; JSON5.parse(fs.readFileSync(p, "utf8"));' "$CONFIG_PATH" >/dev/null 2>&1; then
+    BACKUP_PATH="$CONFIG_PATH.bak"
+    if [ -f "$BACKUP_PATH" ]; then
+      echo "Config parse failed for $CONFIG_PATH; restoring backup $BACKUP_PATH"
+      cp "$BACKUP_PATH" "$CONFIG_PATH"
+    else
+      echo "Config parse failed for $CONFIG_PATH and no backup found at $BACKUP_PATH"
+    fi
+  fi
+fi
+
+# Start OpenClaw gateway
+echo "Starting OpenClaw gateway..."
+exec node /app/openclaw.mjs gateway --allow-unconfigured --port 8080 --bind lan
+EOF
+RUN chmod +x /usr/local/bin/start-railway.sh
+
+# Create runtime directory for Tailscale socket (not /data, that's a volume mount)
+RUN mkdir -p /var/run/tailscale
+
+ENV NODE_ENV=production
+
+# Note: Running as root is required for tailscaled
+# Persistent state lives on /data volume: tailscale, homebrew, openclaw config
+
+# Default command - runs Tailscale, Homebrew setup, and OpenClaw
+CMD ["/usr/local/bin/start-railway.sh"]
