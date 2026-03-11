@@ -120,7 +120,13 @@ sleep 2
 # Authenticate with Tailscale if auth key provided
 if [ -n "$TAILSCALE_AUTHKEY" ]; then
   echo "Authenticating with Tailscale..."
-  tailscale up --authkey="$TAILSCALE_AUTHKEY" --hostname="${TAILSCALE_HOSTNAME:-openclaw-railway}" --accept-routes
+  if tailscale up --authkey="$TAILSCALE_AUTHKEY" --hostname="${TAILSCALE_HOSTNAME:-openclaw-railway}" --accept-routes; then
+    echo "Tailscale authenticated"
+  else
+    echo "Warning: Tailscale authentication failed (check TAILSCALE_AUTHKEY). Continuing without Tailscale auth."
+    # Clear any bad auth state to avoid repeated control-plane retries.
+    tailscale logout >/dev/null 2>&1 || true
+  fi
 else
   echo "Warning: TAILSCALE_AUTHKEY not set, Tailscale not authenticated"
 fi
@@ -141,6 +147,9 @@ fi
 # Update brew PATH for this session
 export PATH="/data/homebrew/bin:/data/homebrew/sbin:$PATH"
 brew --version || true
+
+# Remove stale removed plugin entries from persisted config to avoid warning spam.
+openclaw config unset plugins.entries.google-antigravity-auth >/dev/null 2>&1 || true
 
 # Start OpenClaw gateway
 echo "Starting OpenClaw gateway..."
