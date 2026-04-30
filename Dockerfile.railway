@@ -100,6 +100,12 @@ RUN pnpm ui:build
 # Railway customizations below
 # =============================================================================
 
+# Persist OpenClaw state/workspace on Railway volume by default.
+# Service-level env vars can still override these at deploy time.
+ENV OPENCLAW_STATE_DIR=/data/.openclaw
+ENV OPENCLAW_WORKSPACE_DIR=/data/workspace
+ENV OPENCLAW_CONFIG_PATH=/data/.openclaw/openclaw.json
+
 # Expose the CLI binary without requiring npm global writes.
 RUN ln -sf /app/openclaw.mjs /usr/local/bin/openclaw \
   && chmod 755 /app/openclaw.mjs
@@ -113,6 +119,9 @@ set -e
 echo "Starting tailscaled..."
 mkdir -p /data/tailscale /var/run/tailscale
 tailscaled --state=/data/tailscale/tailscaled.state --socket=/var/run/tailscale/tailscaled.sock --tun=userspace-networking &
+
+# Ensure persistent OpenClaw paths exist before config/session writes.
+mkdir -p "$OPENCLAW_STATE_DIR" "$OPENCLAW_WORKSPACE_DIR"
 
 # Wait for tailscaled to be ready
 sleep 2
