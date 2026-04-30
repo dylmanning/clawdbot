@@ -170,6 +170,7 @@ openclaw config unset plugins.entries.google-antigravity-auth >/dev/null 2>&1 ||
 
 # Prefer service-level shared token when provided to avoid generated-token drift.
 if [ -n "$OPENCLAW_GATEWAY_TOKEN" ]; then
+  openclaw config set gateway.auth.mode token >/dev/null 2>&1 || true
   openclaw config set gateway.auth.token "$OPENCLAW_GATEWAY_TOKEN" >/dev/null 2>&1 || true
 fi
 
