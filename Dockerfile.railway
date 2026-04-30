@@ -105,6 +105,7 @@ RUN pnpm ui:build
 ENV OPENCLAW_STATE_DIR=/data/.openclaw
 ENV OPENCLAW_WORKSPACE_DIR=/data/workspace
 ENV OPENCLAW_CONFIG_PATH=/data/.openclaw/openclaw.json
+ENV OPENCLAW_GATEWAY_PORT=8080
 
 # Expose the CLI binary without requiring npm global writes.
 RUN ln -sf /app/openclaw.mjs /usr/local/bin/openclaw \
@@ -161,12 +162,16 @@ fi
 export PATH="/data/homebrew/bin:/data/homebrew/sbin:$PATH"
 brew --version || true
 
+# Keep gateway bootstrap config deterministic in Railway.
+openclaw config set --batch-json '[{"path":"gateway.mode","value":"local"},{"path":"gateway.port","value":8080},{"path":"gateway.bind","value":"lan"},{"path":"gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback","value":true}]' >/dev/null 2>&1 || true
+
 # Remove stale removed plugin entries from persisted config to avoid warning spam.
 openclaw config unset plugins.entries.google-antigravity-auth >/dev/null 2>&1 || true
 
-# Railway runs gateway with --bind lan, so configure Control UI origin policy
-# to avoid startup failure when explicit allowedOrigins is not provided.
-openclaw config set gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback true >/dev/null 2>&1 || true
+# Prefer service-level shared token when provided to avoid generated-token drift.
+if [ -n "$OPENCLAW_GATEWAY_TOKEN" ]; then
+  openclaw config set gateway.auth.token "$OPENCLAW_GATEWAY_TOKEN" >/dev/null 2>&1 || true
+fi
 
 # Start OpenClaw gateway
 echo "Starting OpenClaw gateway..."
